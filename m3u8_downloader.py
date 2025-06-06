@@ -269,29 +269,24 @@ def merge_segments(stream_name, segments_dir, all_downloaded_segment_files,
     logging.info(f"Found {len(non_ad_segments_to_merge_relative_paths)} non-ad segments to merge for '{stream_name}'.")
 
     ffmpeg_input_list_path = os.path.join(segments_dir, f"{stream_name}_ffmpeg_input.txt")
-    # Ensure the merged file is placed in the correct output directory, not segments_dir
     merged_ts_output_path = os.path.join(output_dir_for_merged_file, f"{stream_name}_merged.ts")
 
     try:
         with open(ffmpeg_input_list_path, 'w') as list_file:
             for rel_path in non_ad_segments_to_merge_relative_paths:
-                # Ensure paths are correctly quoted for ffmpeg if they might contain special characters
-                # For simple '0001.ts' type names, direct usage is fine.
-                list_file.write(f"file '{rel_path.replace(\"'\", \"'\\\\''\")}'\n") # Basic sanitization for single quotes in filename
+                list_file.write(f"file '{rel_path}'\n") # Corrected line
         logging.debug(f"Created FFmpeg input list: {ffmpeg_input_list_path}")
 
         ffmpeg_cmd = [
             ffmpeg_path,
             "-f", "concat",
             "-safe", "0",
-            "-i", os.path.basename(ffmpeg_input_list_path), # Use only basename for -i when cwd is segments_dir
+            "-i", os.path.basename(ffmpeg_input_list_path),
             "-c", "copy",
             "-y",
-            merged_ts_output_path # Use the full path for the output file
+            merged_ts_output_path
         ]
         logging.info(f"Running FFmpeg command for '{stream_name}': {' '.join(ffmpeg_cmd)}")
-        # The CWD for FFmpeg should be segments_dir so it can find the list file by its basename
-        # and the files listed within that list file (which are also just basenames)
         result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, cwd=segments_dir)
         logging.info(f"Successfully merged non-ad segments for '{stream_name}' to '{merged_ts_output_path}'.")
         logging.debug(f"FFmpeg merge output for {stream_name}:\n{result.stdout}")
@@ -483,7 +478,7 @@ def main():
                 merged_file_path = merge_segments(
                     name, sub_dir_path, all_segment_filenames,
                     ads_by_resolution, ads_by_ssim,
-                    args.output_dir, args.ffmpeg_path # Merged file to main output dir
+                    args.output_dir, args.ffmpeg_path
                 )
                 if merged_file_path:
                     logging.info(f"Successfully merged non-ad segments for '{name}' to: {merged_file_path}")
