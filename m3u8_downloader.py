@@ -55,19 +55,29 @@ def extract_first_frame(video_path, output_image_path):
         if not cap.isOpened():
             logging.warning(f"Could not open video file for frame extraction: {video_path}")
             return False
+
         success, frame = cap.read()
-        if not success:
+        if success:
+            try:
+                logging.debug(f"Original frame size: {frame.shape[1]}x{frame.shape[0]} for {video_path}")
+                resized_frame = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
+                logging.debug(f"Resized frame from {video_path} to 320x180 before saving to {output_image_path}")
+
+                if cv2.imwrite(output_image_path, resized_frame):
+                    logging.debug(f"Successfully extracted and saved resized first frame from {video_path} to {output_image_path}")
+                    return True
+                else:
+                    logging.error(f"Failed to save resized frame to {output_image_path} (cv2.imwrite might have failed silently).")
+                    return False
+            except Exception as e:
+                logging.error(f"Error resizing or writing frame from {video_path}: {e}", exc_info=True)
+                return False
+        else:
             logging.warning(f"Could not read first frame from video: {video_path}")
             return False
-        cv2.imwrite(output_image_path, frame)
-        if os.path.exists(output_image_path):
-            logging.debug(f"Successfully extracted first frame from {video_path} to {output_image_path}")
-            return True
-        else:
-            logging.error(f"Failed to save frame to {output_image_path} (cv2.imwrite might have failed silently).")
-            return False
-    except cv2.error as e:
-        logging.error(f"OpenCV error during frame extraction from {video_path}: {e}", exc_info=True)
+
+    except cv2.error as e: # Should be caught by the general Exception below if specific handling isn't needed
+        logging.error(f"OpenCV error during frame extraction setup from {video_path}: {e}", exc_info=True)
         return False
     except Exception as e:
         logging.error(f"An unexpected error occurred during frame extraction from {video_path}: {e}", exc_info=True)
@@ -86,11 +96,20 @@ def get_ssim_score(image_path1, image_path2):
         if img2 is None:
             logging.warning(f"Could not read image {image_path2} for SSIM.")
             return 0.0
+
+        # SSIM expects grayscale images of the same size. Frames are now resized to 320x180.
+        # If not, resizing here would be another option:
+        # if img1.shape != img2.shape:
+        #    logging.warning(f"Image dimensions mismatch for SSIM: {img1.shape} vs {img2.shape}. Resizing {os.path.basename(image_path2)} to match {os.path.basename(image_path1)}.")
+        #    img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_AREA)
+
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-        if gray1.shape != gray2.shape:
-            logging.warning(f"Image dimensions mismatch for SSIM: {gray1.shape} vs {gray2.shape}. {os.path.basename(image_path1)} and {os.path.basename(image_path2)}. Returning 0.0 SSIM score.")
+
+        if gray1.shape != gray2.shape: # This should ideally not happen if all frames are resized to a standard size.
+            logging.warning(f"Grayscale image dimensions mismatch for SSIM: {gray1.shape} vs {gray2.shape} between {os.path.basename(image_path1)} and {os.path.basename(image_path2)}. This might indicate an issue with frame resizing. Returning 0.0.")
             return 0.0
+
         score, _ = ssim(gray1, gray2, full=True)
         logging.debug(f"SSIM score between {os.path.basename(image_path1)} and {os.path.basename(image_path2)}: {score:.4f}")
         return score
@@ -113,8 +132,8 @@ def process_advertisements(ads_dir_path, temp_ads_frames_path):
             continue
         frame_filename = f"{os.path.splitext(filename)[0]}_frame.jpg"
         output_image_path = os.path.join(temp_ads_frames_path, frame_filename)
-        if extract_first_frame(ad_video_path, output_image_path):
-            logging.info(f"Extracted first frame for ad '{filename}' to '{output_image_path}'")
+        if extract_first_frame(ad_video_path, output_image_path): # Frames are now resized by extract_first_frame
+            logging.info(f"Extracted and resized first frame for ad '{filename}' to '{output_image_path}'")
             ad_frame_paths.append(output_image_path)
         else:
             logging.warning(f"Failed to extract first frame for ad '{filename}' from '{ad_video_path}'")
@@ -162,11 +181,11 @@ def download_segments(name, m3u8_url, output_subdir_path):
                 logging.error(f"Failed to fetch playlist {m3u8_url} for '{name}' after {MAX_DOWNLOAD_RETRIES} attempts.")
                 return []
             time.sleep(RETRY_SLEEP_DURATION)
-        except requests.exceptions.RequestException as e: # Catch other request exceptions (like HTTP 4xx/5xx)
+        except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching M3U8 playlist for '{name}': {e}", exc_info=True)
             return []
 
-    if not playlist_content: # Should be caught by loop logic, but as a safeguard
+    if not playlist_content:
         logging.error(f"Playlist content is empty for '{name}' after attempting downloads.")
         return []
 
@@ -215,19 +234,18 @@ def download_segments(name, m3u8_url, output_subdir_path):
                     logging.warning(f"Timeout/ConnectionError downloading segment {segment_url} for '{name}' (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES}). Retrying in {RETRY_SLEEP_DURATION}s... Error: {e}")
                     if attempt == MAX_DOWNLOAD_RETRIES - 1:
                         logging.error(f"Failed to download segment {segment_url} for '{name}' after {MAX_DOWNLOAD_RETRIES} attempts. Skipping segment.")
-                        # segment_downloaded_successfully remains False
                     time.sleep(RETRY_SLEEP_DURATION)
-                except requests.exceptions.RequestException as e: # Catch other request exceptions
+                except requests.exceptions.RequestException as e:
                     logging.error(f"Error downloading segment {segment_url} for '{name}': {e}. Skipping segment.", exc_info=True)
-                    break # Don't retry on other request errors for segments, just skip
+                    break
                 except Exception as e:
                     logging.error(f"An unexpected error occurred while downloading segment {segment_url} for '{name}': {e}. Skipping segment.", exc_info=True)
-                    break # Don't retry, just skip
+                    break
 
             if not segment_downloaded_successfully:
-                continue # Move to the next segment if this one failed all retries or had a non-retryable error
+                continue
 
-        if os.path.exists(segment_filepath): # Proceed with resolution check if segment exists (either pre-existing or downloaded)
+        if os.path.exists(segment_filepath):
             current_segment_resolution = get_video_resolution(segment_filepath)
             if current_segment_resolution:
                 if first_segment_resolution is None:
@@ -431,10 +449,10 @@ def main():
                         continue
                     segment_frame_basename = f"{os.path.splitext(segment_filename)[0]}.jpg"
                     segment_frame_image_path = os.path.join(current_temp_segment_frames_path, segment_frame_basename)
-                    if not extract_first_frame(segment_file_path, segment_frame_image_path):
+                    if not extract_first_frame(segment_file_path, segment_frame_image_path): # Frames are resized here
                         logging.warning(f"Could not extract frame from {segment_filename} for SSIM for stream {name}. Skipping.")
                         continue
-                    for ad_frame_path in ad_frame_paths:
+                    for ad_frame_path in ad_frame_paths: # ad_frame_paths also contain resized frames
                         score = get_ssim_score(segment_frame_image_path, ad_frame_path)
                         if score > args.ssim_threshold:
                             logging.info(f"Segment {segment_filename} for stream '{name}' matches ad {os.path.basename(ad_frame_path)} (SSIM: {score:.4f}). Marking as ad.")
