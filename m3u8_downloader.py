@@ -276,18 +276,17 @@ def merge_segments(stream_name, segments_dir, all_downloaded_segment_files,
             for rel_path in non_ad_segments_to_merge_relative_paths:
                 list_file.write(f"file '{rel_path}'\n") # Corrected line
         logging.debug(f"Created FFmpeg input list: {ffmpeg_input_list_path}")
-
         ffmpeg_cmd = [
             ffmpeg_path,
             "-f", "concat",
             "-safe", "0",
-            "-i", os.path.basename(ffmpeg_input_list_path),
+            "-i", ffmpeg_input_list_path,
             "-c", "copy",
             "-y",
             merged_ts_output_path
         ]
         logging.info(f"Running FFmpeg command for '{stream_name}': {' '.join(ffmpeg_cmd)}")
-        result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, cwd=segments_dir)
+        result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
         logging.info(f"Successfully merged non-ad segments for '{stream_name}' to '{merged_ts_output_path}'.")
         logging.debug(f"FFmpeg merge output for {stream_name}:\n{result.stdout}")
         return merged_ts_output_path
@@ -302,11 +301,7 @@ def merge_segments(stream_name, segments_dir, all_downloaded_segment_files,
         logging.error(f"An unexpected error occurred during segment merging for '{stream_name}': {e}", exc_info=True)
         return None
     finally:
-        if os.path.exists(ffmpeg_input_list_path):
-            try:
-                os.remove(ffmpeg_input_list_path)
-            except OSError as e:
-                logging.warning(f"Error cleaning up FFmpeg input list {ffmpeg_input_list_path}: {e}")
+        pass
 
 def convert_to_mp4(merged_ts_path, stream_name, output_dir, ffmpeg_path):
     if not os.path.exists(merged_ts_path):
@@ -446,6 +441,7 @@ def main():
 
                 for segment_filename in downloaded_segment_files:
                     segment_file_path = os.path.join(sub_dir_path, segment_filename)
+                    logging.info(f"Checking segment {segment_filename}")
                     if segment_file_path in ads_by_resolution:
                         logging.debug(f"Segment {segment_filename} already marked as ad by resolution. Skipping SSIM check for {name}.")
                         continue
