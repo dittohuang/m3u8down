@@ -76,7 +76,7 @@ def extract_first_frame(video_path, output_image_path):
             logging.warning(f"Could not read first frame from video: {video_path}")
             return False
 
-    except cv2.error as e: # Should be caught by the general Exception below if specific handling isn't needed
+    except cv2.error as e:
         logging.error(f"OpenCV error during frame extraction setup from {video_path}: {e}", exc_info=True)
         return False
     except Exception as e:
@@ -97,16 +97,10 @@ def get_ssim_score(image_path1, image_path2):
             logging.warning(f"Could not read image {image_path2} for SSIM.")
             return 0.0
 
-        # SSIM expects grayscale images of the same size. Frames are now resized to 320x180.
-        # If not, resizing here would be another option:
-        # if img1.shape != img2.shape:
-        #    logging.warning(f"Image dimensions mismatch for SSIM: {img1.shape} vs {img2.shape}. Resizing {os.path.basename(image_path2)} to match {os.path.basename(image_path1)}.")
-        #    img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_AREA)
-
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
-        if gray1.shape != gray2.shape: # This should ideally not happen if all frames are resized to a standard size.
+        if gray1.shape != gray2.shape:
             logging.warning(f"Grayscale image dimensions mismatch for SSIM: {gray1.shape} vs {gray2.shape} between {os.path.basename(image_path1)} and {os.path.basename(image_path2)}. This might indicate an issue with frame resizing. Returning 0.0.")
             return 0.0
 
@@ -132,7 +126,7 @@ def process_advertisements(ads_dir_path, temp_ads_frames_path):
             continue
         frame_filename = f"{os.path.splitext(filename)[0]}_frame.jpg"
         output_image_path = os.path.join(temp_ads_frames_path, frame_filename)
-        if extract_first_frame(ad_video_path, output_image_path): # Frames are now resized by extract_first_frame
+        if extract_first_frame(ad_video_path, output_image_path):
             logging.info(f"Extracted and resized first frame for ad '{filename}' to '{output_image_path}'")
             ad_frame_paths.append(output_image_path)
         else:
@@ -273,18 +267,31 @@ def merge_segments(stream_name, segments_dir, all_downloaded_segment_files,
         logging.info(f"No non-advertisement segments found to merge for '{stream_name}'.")
         return None
     logging.info(f"Found {len(non_ad_segments_to_merge_relative_paths)} non-ad segments to merge for '{stream_name}'.")
+
     ffmpeg_input_list_path = os.path.join(segments_dir, f"{stream_name}_ffmpeg_input.txt")
+    # Ensure the merged file is placed in the correct output directory, not segments_dir
     merged_ts_output_path = os.path.join(output_dir_for_merged_file, f"{stream_name}_merged.ts")
+
     try:
         with open(ffmpeg_input_list_path, 'w') as list_file:
             for rel_path in non_ad_segments_to_merge_relative_paths:
-                list_file.write(f"file '{rel_path}'\n")
+                # Ensure paths are correctly quoted for ffmpeg if they might contain special characters
+                # For simple '0001.ts' type names, direct usage is fine.
+                list_file.write(f"file '{rel_path.replace(\"'\", \"'\\\\''\")}'\n") # Basic sanitization for single quotes in filename
         logging.debug(f"Created FFmpeg input list: {ffmpeg_input_list_path}")
+
         ffmpeg_cmd = [
-            ffmpeg_path, "-f", "concat", "-safe", "0", "-i", ffmpeg_input_list_path,
-            "-c", "copy", "-y", merged_ts_output_path
+            ffmpeg_path,
+            "-f", "concat",
+            "-safe", "0",
+            "-i", os.path.basename(ffmpeg_input_list_path), # Use only basename for -i when cwd is segments_dir
+            "-c", "copy",
+            "-y",
+            merged_ts_output_path # Use the full path for the output file
         ]
         logging.info(f"Running FFmpeg command for '{stream_name}': {' '.join(ffmpeg_cmd)}")
+        # The CWD for FFmpeg should be segments_dir so it can find the list file by its basename
+        # and the files listed within that list file (which are also just basenames)
         result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, cwd=segments_dir)
         logging.info(f"Successfully merged non-ad segments for '{stream_name}' to '{merged_ts_output_path}'.")
         logging.debug(f"FFmpeg merge output for {stream_name}:\n{result.stdout}")
@@ -449,10 +456,10 @@ def main():
                         continue
                     segment_frame_basename = f"{os.path.splitext(segment_filename)[0]}.jpg"
                     segment_frame_image_path = os.path.join(current_temp_segment_frames_path, segment_frame_basename)
-                    if not extract_first_frame(segment_file_path, segment_frame_image_path): # Frames are resized here
+                    if not extract_first_frame(segment_file_path, segment_frame_image_path):
                         logging.warning(f"Could not extract frame from {segment_filename} for SSIM for stream {name}. Skipping.")
                         continue
-                    for ad_frame_path in ad_frame_paths: # ad_frame_paths also contain resized frames
+                    for ad_frame_path in ad_frame_paths:
                         score = get_ssim_score(segment_frame_image_path, ad_frame_path)
                         if score > args.ssim_threshold:
                             logging.info(f"Segment {segment_filename} for stream '{name}' matches ad {os.path.basename(ad_frame_path)} (SSIM: {score:.4f}). Marking as ad.")
@@ -476,7 +483,7 @@ def main():
                 merged_file_path = merge_segments(
                     name, sub_dir_path, all_segment_filenames,
                     ads_by_resolution, ads_by_ssim,
-                    args.output_dir, args.ffmpeg_path
+                    args.output_dir, args.ffmpeg_path # Merged file to main output dir
                 )
                 if merged_file_path:
                     logging.info(f"Successfully merged non-ad segments for '{name}' to: {merged_file_path}")
