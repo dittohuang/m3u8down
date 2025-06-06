@@ -9,6 +9,12 @@ from skimage.metrics import structural_similarity as ssim
 import shutil
 import subprocess
 import logging
+import time
+
+# Global constants
+DEFAULT_TIMEOUT = 15  # seconds
+MAX_DOWNLOAD_RETRIES = 10 # Max retries for downloads
+RETRY_SLEEP_DURATION = 5 # seconds
 
 def parse_input_file(file_path):
     pairs = []
@@ -141,14 +147,29 @@ def get_video_resolution(video_path):
             cap.release()
 
 def download_segments(name, m3u8_url, output_subdir_path):
-    logging.info(f"Starting download for '{name}' from {m3u8_url}")
-    try:
-        response = requests.get(m3u8_url, timeout=10)
-        response.raise_for_status()
-        playlist_content = response.text
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching M3U8 playlist for '{name}': {e}", exc_info=True)
+    logging.info(f"Fetching M3U8 playlist for '{name}' from {m3u8_url}")
+    playlist_content = None
+    for attempt in range(MAX_DOWNLOAD_RETRIES):
+        try:
+            response = requests.get(m3u8_url, timeout=DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            playlist_content = response.text
+            logging.info(f"Successfully fetched M3U8 playlist for '{name}'.")
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logging.warning(f"Timeout/ConnectionError fetching playlist {m3u8_url} for '{name}' (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES}). Retrying in {RETRY_SLEEP_DURATION}s... Error: {e}")
+            if attempt == MAX_DOWNLOAD_RETRIES - 1:
+                logging.error(f"Failed to fetch playlist {m3u8_url} for '{name}' after {MAX_DOWNLOAD_RETRIES} attempts.")
+                return []
+            time.sleep(RETRY_SLEEP_DURATION)
+        except requests.exceptions.RequestException as e: # Catch other request exceptions (like HTTP 4xx/5xx)
+            logging.error(f"Error fetching M3U8 playlist for '{name}': {e}", exc_info=True)
+            return []
+
+    if not playlist_content: # Should be caught by loop logic, but as a safeguard
+        logging.error(f"Playlist content is empty for '{name}' after attempting downloads.")
         return []
+
     segment_urls = []
     lines = playlist_content.splitlines()
     for line in lines:
@@ -162,33 +183,51 @@ def download_segments(name, m3u8_url, output_subdir_path):
         else:
             segment_url = line
         segment_urls.append(segment_url)
+
     if not segment_urls:
         logging.warning(f"No segment URLs found in M3U8 playlist for '{name}'.")
         return []
     logging.info(f"Found {len(segment_urls)} segments for '{name}'.")
+
     first_segment_resolution = None
     advertisement_segments_by_resolution = []
+
     for i, segment_url in enumerate(segment_urls, 1):
         segment_filename = f"{i:04d}.ts"
         segment_filepath = os.path.join(output_subdir_path, segment_filename)
+
         if os.path.exists(segment_filepath):
-            logging.info(f"Segment {segment_filename} for '{name}' already exists. Skipping.")
+            logging.info(f"Segment {segment_filename} for '{name}' already exists. Skipping download.")
         else:
-            logging.info(f"Downloading segment {i}/{len(segment_urls)} for '{name}': {segment_url} to {segment_filepath}")
-            try:
-                segment_response = requests.get(segment_url, stream=True, timeout=10)
-                segment_response.raise_for_status()
-                with open(segment_filepath, 'wb') as f:
-                    for chunk in segment_response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                logging.info(f"Successfully downloaded {segment_filename} for '{name}'.")
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Error downloading segment {segment_url} for '{name}': {e}", exc_info=True)
-                continue
-            except Exception as e:
-                logging.error(f"An unexpected error occurred while downloading {segment_url} for '{name}': {e}", exc_info=True)
-                continue
-        if os.path.exists(segment_filepath):
+            segment_downloaded_successfully = False
+            for attempt in range(MAX_DOWNLOAD_RETRIES):
+                try:
+                    logging.info(f"Downloading segment {i}/{len(segment_urls)} for '{name}' (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES}): {segment_url}")
+                    segment_response = requests.get(segment_url, stream=True, timeout=DEFAULT_TIMEOUT)
+                    segment_response.raise_for_status()
+                    with open(segment_filepath, 'wb') as f:
+                        for chunk in segment_response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    logging.info(f"Successfully downloaded {segment_filename} for '{name}'.")
+                    segment_downloaded_successfully = True
+                    break
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                    logging.warning(f"Timeout/ConnectionError downloading segment {segment_url} for '{name}' (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES}). Retrying in {RETRY_SLEEP_DURATION}s... Error: {e}")
+                    if attempt == MAX_DOWNLOAD_RETRIES - 1:
+                        logging.error(f"Failed to download segment {segment_url} for '{name}' after {MAX_DOWNLOAD_RETRIES} attempts. Skipping segment.")
+                        # segment_downloaded_successfully remains False
+                    time.sleep(RETRY_SLEEP_DURATION)
+                except requests.exceptions.RequestException as e: # Catch other request exceptions
+                    logging.error(f"Error downloading segment {segment_url} for '{name}': {e}. Skipping segment.", exc_info=True)
+                    break # Don't retry on other request errors for segments, just skip
+                except Exception as e:
+                    logging.error(f"An unexpected error occurred while downloading segment {segment_url} for '{name}': {e}. Skipping segment.", exc_info=True)
+                    break # Don't retry, just skip
+
+            if not segment_downloaded_successfully:
+                continue # Move to the next segment if this one failed all retries or had a non-retryable error
+
+        if os.path.exists(segment_filepath): # Proceed with resolution check if segment exists (either pre-existing or downloaded)
             current_segment_resolution = get_video_resolution(segment_filepath)
             if current_segment_resolution:
                 if first_segment_resolution is None:
@@ -321,7 +360,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Reconfigure logging level if specified
     numeric_level = getattr(logging, args.log_level.upper(), None)
     if not isinstance(numeric_level, int):
         logging.error(f"Invalid log level: {args.log_level}. Defaulting to INFO.")
@@ -336,7 +374,6 @@ def main():
     logging.info(f"FFmpeg Path: {args.ffmpeg_path}")
     logging.info(f"Cleanup Enabled: {args.cleanup}")
     logging.info(f"Log Level: {args.log_level.upper()}")
-
 
     temp_frames_main_dir = os.path.join(args.output_dir, ".temp_frames")
     temp_ads_frames_path = os.path.join(temp_frames_main_dir, "ads")
@@ -372,7 +409,7 @@ def main():
             os.makedirs(sub_dir_path, exist_ok=True)
             logging.debug(f"Ensured stream segment directory exists: {sub_dir_path}")
 
-            ads_by_resolution = download_segments(name, url, sub_dir_path) # ffmpeg_path removed
+            ads_by_resolution = download_segments(name, url, sub_dir_path)
 
             ads_by_ssim = []
             if ad_frame_paths:
