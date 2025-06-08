@@ -330,44 +330,45 @@ def convert_to_mp4(merged_ts_path, stream_name, output_dir, ffmpeg_path):
         logging.error(f"An unexpected error occurred during MP4 conversion for '{stream_name}': {e}", exc_info=True)
         return None
 
-def cleanup_files(segments_dir, merged_ts_path, temp_stream_frames_path):
+def cleanup_files(segments_dir, merged_ts_path, temp_stream_frames_path, clean_all):
     logging.info(f"Initiating cleanup for stream resources related to '{os.path.basename(segments_dir)}'...")
-    if segments_dir and os.path.exists(segments_dir):
-        try:
-            shutil.rmtree(segments_dir)
-            logging.info(f"Cleaned up segment directory: {segments_dir}")
-        except Exception as e:
-            logging.error(f"Error cleaning up segment directory {segments_dir}: {e}", exc_info=True)
     if merged_ts_path and os.path.exists(merged_ts_path):
         try:
             os.remove(merged_ts_path)
             logging.info(f"Cleaned up merged .ts file: {merged_ts_path}")
         except OSError as e:
             logging.error(f"Error cleaning up merged .ts file {merged_ts_path}: {e}", exc_info=True)
-    if temp_stream_frames_path and os.path.exists(temp_stream_frames_path):
-        try:
-            shutil.rmtree(temp_stream_frames_path)
-            logging.info(f"Cleaned up temporary stream frames directory: {temp_stream_frames_path}")
-        except Exception as e:
-            logging.error(f"Error cleaning up temporary stream frames directory {temp_stream_frames_path}: {e}", exc_info=True)
+    if clean_all:
+        if segments_dir and os.path.exists(segments_dir):
+            try:
+                shutil.rmtree(segments_dir)
+                logging.info(f"Cleaned up segment directory: {segments_dir}")
+            except Exception as e:
+                logging.error(f"Error cleaning up segment directory {segments_dir}: {e}", exc_info=True)
+        if temp_stream_frames_path and os.path.exists(temp_stream_frames_path):
+            try:
+                shutil.rmtree(temp_stream_frames_path)
+                logging.info(f"Cleaned up temporary stream frames directory: {temp_stream_frames_path}")
+            except Exception as e:
+                logging.error(f"Error cleaning up temporary stream frames directory {temp_stream_frames_path}: {e}", exc_info=True)
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
     parser = argparse.ArgumentParser(description="M3U8 Downloader")
     parser.add_argument(
-        "--input_file", "-i", required=True, help="Path to the input TXT file")
+        "--input_file", "-i", default="list.txt", help="Path to the input TXT file (default: list.txt)")
     parser.add_argument(
-        "--output_dir", "-o", required=True, help="Path to the directory where downloaded files will be saved")
+        "--output_dir", "-o", default="download", help="Path to the directory where downloaded files will be saved (default: download)")
     parser.add_argument(
-        "--ads_dir", "-a", required=True, help="Path to the directory containing advertisement video segments")
+        "--ads_dir", "-a", default="ad", help="Path to the directory containing advertisement video segments (default: ad)")
     parser.add_argument(
-        "--ssim_threshold", "-s", type=float, default=0.8, help="Float value for SSIM comparison (default: 0.8)")
+        "--ssim_threshold", "-s", type=float, default=0.95, help="Float value for SSIM comparison (default: 0.95)")
     parser.add_argument(
         "--ffmpeg_path", default="ffmpeg", help="Path to ffmpeg executable (default: ffmpeg)")
     parser.add_argument(
         "--cleanup", action="store_true", default=False,
-        help="Remove all downloaded segment files, the intermediate merged .ts file, and temporary frames after successful MP4 conversion."
+        help="Remove all downloaded segment files, the intermediate merged .ts file, and temporary frames after successful MP4 conversion.  (default: False)"
     )
     parser.add_argument(
         "--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -390,7 +391,7 @@ def main():
     logging.info(f"Cleanup Enabled: {args.cleanup}")
     logging.info(f"Log Level: {args.log_level.upper()}")
 
-    temp_frames_main_dir = os.path.join(args.output_dir, ".temp_frames")
+    temp_frames_main_dir = os.path.join(args.output_dir, "ad_frames")
     temp_ads_frames_path = os.path.join(temp_frames_main_dir, "ads")
 
     if os.path.exists(temp_ads_frames_path):
@@ -457,9 +458,9 @@ def main():
                             ads_by_ssim.append(segment_file_path)
                             break
                 if ads_by_ssim:
-                    logging.info(f"Segments detected as ads by SSIM for '{name}': {len(ads_by_ssim)}")
+                    logging.debug(f"Segments detected as ads by SSIM for '{name}': {len(ads_by_ssim)}")
                 else:
-                    logging.info(f"No new segments detected as ads by SSIM for '{name}'.")
+                    logging.debug(f"No new segments detected as ads by SSIM for '{name}'.")
             else:
                  current_temp_segment_frames_path = None
 
@@ -471,6 +472,11 @@ def main():
             if not all_segment_filenames:
                 logging.warning(f"No .ts segments found in {sub_dir_path} to consider for merging for '{name}'.")
             else:
+                total_ads = len(ads_by_ssim) + len(ads_by_resolution)
+                if total_ads <= 1:
+                    logging.info(f"AD_WARNING: Only detected {total_ads} ads.")
+                else:
+                    logging.info(f"AD_INFO: Detected {total_ads} ads.")
                 merged_file_path = merge_segments(
                     name, sub_dir_path, all_segment_filenames,
                     ads_by_resolution, ads_by_ssim,
@@ -481,9 +487,8 @@ def main():
                     final_mp4_path = convert_to_mp4(merged_file_path, name, args.output_dir, args.ffmpeg_path)
                     if final_mp4_path:
                         logging.info(f"Successfully converted '{name}' to MP4: {final_mp4_path}")
-                        if args.cleanup:
-                            logging.info(f"Cleanup requested for '{name}'.")
-                            cleanup_files(sub_dir_path, merged_file_path, current_temp_segment_frames_path)
+                        logging.info(f"Cleanup for '{name}'.")
+                        cleanup_files(sub_dir_path, merged_file_path, current_temp_segment_frames_path, args.cleanup)
                     else:
                         logging.error(f"MP4 conversion failed for '{name}'.")
                 else:
